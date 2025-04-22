@@ -1,0 +1,1 @@
+mpicc -fopenmp fractal_mpi_openmp_combo.c -lm -o fractal_mpi_openmp_combo

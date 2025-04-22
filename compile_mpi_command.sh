@@ -1,0 +1,1 @@
+mpicc fractal_mpi.c -lm -lgmp -o fractal_mpi
