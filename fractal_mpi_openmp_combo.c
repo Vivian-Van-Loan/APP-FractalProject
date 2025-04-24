@@ -8,9 +8,7 @@
 #include <sys/time.h>
 
 #include <mpi.h>
-//#include <gmp.h> //Useful(ish) library that handles rational arith for us
-
-//#define Rational mpq_t
+#include <omp.h>
 
 typedef struct Rational {
     unsigned long numerator;
@@ -250,23 +248,30 @@ void main_loop(FractalInfo info) {
 }
 
 void compute_fractal(FractalInfo* info) {
-    for (size_t y = 0; y < info->sub_grid_size_y; y++) {
-        for (size_t x = 0; x < info->sub_grid_size_x; x++) {
-            size_t x_offset = x + info->sub_grid_offset_x;
-            size_t y_offset = y + info->sub_grid_offset_y;
-            complex float* z = &info->sub_grid[y * info->sub_grid_size_x + x];
-            *z = (info->left_point + x_offset * info->point_step) + (info->top_point - y_offset * info->point_step) * I;
-            
-            for (size_t itr = 0; itr < 200; itr++) {
-                *z = cpowf(*z, 2) + info->c;
+    size_t const BLOCK_SIZE = 32;
+    for (size_t y_block = 0; y_block < info->sub_grid_size_y; y_block += BLOCK_SIZE) {
+        #pragma omp parallel for firstprivate(y_block)
+        for (size_t y = y_block; y < y_block + BLOCK_SIZE; y++) {
+            if (y >= info->sub_grid_size_y) {
+                continue;
+            }
+            for (size_t x = 0; x < info->sub_grid_size_x; x++) {
+                size_t x_offset = x + info->sub_grid_offset_x;
+                size_t y_offset = y + info->sub_grid_offset_y;
+                complex float* z = &info->sub_grid[y * info->sub_grid_size_x + x];
+                *z = (info->left_point + x_offset * info->point_step) + (info->top_point - y_offset * info->point_step) * I;
                 
-                if (cabsf(*z) > 200) {
-                    //printf("Breaking at point (%zu, %zu)\n", x, y);
-                    break;
+                for (size_t itr = 0; itr < 200; itr++) {
+                    *z = cpowf(*z, 2) + info->c;
+                    
+                    if (cabsf(*z) > 200) {
+                        //printf("Breaking at point (%zu, %zu)\n", x, y);
+                        break;
+                    }
                 }
             }
         }
-        if (y % 4 == 0 && (info->sub_grid_size_y - y) > info->num_procs * 2) { //stop them from fighting over each other at small remaining values
+        if ((info->sub_grid_size_y - y_block) > info->num_procs * 2) { //stop them from fighting over each other at small remaining values
             int request;
             MPI_Status status;
             MPI_Iprobe(MPI_ANY_SOURCE, TAG_WORK_REQUEST, MPI_COMM_WORLD, &request, &status);
@@ -276,13 +281,13 @@ void compute_fractal(FractalInfo* info) {
                 //printf("Proc %d: Processing work request\n", info->rank);
                 //unsigned long old_num = info->energy.numerator;
                 ULONG_BUFFER buf;
-                buf[0] = ((info->sub_grid_size_y - y) / 2);
+                buf[0] = ((info->sub_grid_size_y - y_block) / 2);
                 buf[1] = info->sub_grid_size_x;
-                buf[2] = info->sub_grid_offset_y + y + ((info->sub_grid_size_y - y) / 2) + ((info->sub_grid_size_y - y) % 2);
+                buf[2] = info->sub_grid_offset_y + y_block + ((info->sub_grid_size_y - y_block) / 2) + ((info->sub_grid_size_y - y_block) % 2);
                 buf[3] = info->sub_grid_offset_x;
                 buf[4] = buf[0] * buf[1]; //energy, size_x * size_y
                 
-                info->sub_grid_size_y = ((info->sub_grid_size_y - y) / 2) + ((info->sub_grid_size_y - y) % 2);
+                info->sub_grid_size_y = ((info->sub_grid_size_y - y_block) / 2) + ((info->sub_grid_size_y - y_block) % 2);
                 info->energy.numerator -= buf[4];
                 MPI_Send(buf, ULONG_BUFFER_COUNT, MPI_UNSIGNED_LONG, target, TAG_WORK_RESPONSE, MPI_COMM_WORLD);
                 /*if (buf[4] + info->energy.numerator != old_num) {
@@ -315,28 +320,3 @@ void compute_fractal(FractalInfo* info) {
     }
     return;
 }
-
-/*
-Rational rational_halve(Rational in) {
-    Rational out = {in.numerator, in.denominator * 2};
-    return out;
-}
-
-Rational rational_add(Rational lhs, Rational rhs) {
-    Rational max, min;
-    if (lhs.denominator >= rhs.denominator) {
-        max = lhs;
-        min = rhs;
-    } else {
-        max = rhs;
-        min = lhs;
-    }
-    while (min.denominator != max.denominator) {
-        min.numerator *= 2;
-        min.denominator *= 2;
-    }
-    
-    max.numerator += min.numerator;
-    max.denominator += min.denominator;
-    return max;
-}*/
