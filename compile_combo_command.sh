@@ -1,1 +1,2 @@
 mpicc -fopenmp fractal_mpi_openmp_combo.c -lm -o fractal_mpi_openmp_combo
+export SIZE=1024; rm fractal.out; mpirun -np 4 fractal_mpi_openmp_combo $SIZE $SIZE 0.306576275 0.4433343679 -1 1 $(bc <<< "scale=15;2/$SIZE")
