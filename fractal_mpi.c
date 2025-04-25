@@ -8,18 +8,11 @@
 #include <sys/time.h>
 
 #include <mpi.h>
-//#include <gmp.h> //Useful(ish) library that handles rational arith for us
-
-//#define Rational mpq_t
 
 typedef struct Rational {
     unsigned long numerator;
     unsigned long denominator;
 } Rational;
-
-/*
-Rational rational_halve(Rational in);
-Rational rational_add(Rational lhs, Rational rhs);*/
 
 enum tags {
     TAG_WORK_REQUEST = 2,
@@ -48,8 +41,6 @@ typedef struct FractalInfo {
 
 typedef unsigned long ULONG_BUFFER[5];
 #define ULONG_BUFFER_COUNT (sizeof(ULONG_BUFFER) / sizeof(unsigned long))
-//MPI_Datatype mpi_ulong_vec;
-
 void main_loop(FractalInfo info);
 void compute_fractal(FractalInfo* info);
 
@@ -90,11 +81,6 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(&info.top_point, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&info.point_step, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
     
-    //MPI_Type_vector(sizeof(ULONG_BUFFER) / sizeof(unsigned long), 1, 1, MPI_UNSIGNED_LONG, &mpi_ulong_vec);
-    
-    //mpq_init(info.energy);
-    //mpq_set_ui(info.energy, 1, info.num_procs); //in classic GNU fashion, all the type and function names are incomprehensible. This sets the fraction
-    
     unsigned long y_div = info.num_procs;
     unsigned long x_div = 1;
     while (y_div > info.total_grid_height) {
@@ -113,31 +99,27 @@ int main(int argc, char* argv[]) {
     }
     info.sub_grid_size_x = info.total_grid_width / x_div;
     if (rank_x == x_div - 1) {
-        info.sub_grid_size_y += info.total_grid_width % x_div;
+        info.sub_grid_size_x += info.total_grid_width % x_div;
     }
-    /*info.sub_grid_offset_x = (info.total_grid_width / x_div) * (info.rank % x_div);
-    info.sub_grid_offset_y = (info.total_grid_height / y_div) * (info.rank % y_div);
-    if (info.rank % y_div == y_div - 1) { //note: still not correct, needs to be more complicated like if % x_div == x_div - 1 for the y so you know its on the right edge
-        info.sub_grid_size_y = (info.total_grid_height / y_div) + (info.sub_grid_size_y = info.total_grid_height % y_div);
-    } else {
-        info.sub_grid_size_y = info.total_grid_height / y_div;
-    }
-    
-    if (info.rank % x_div == x_div - 1) {
-        info.sub_grid_size_x = (info.total_grid_width / x_div) + (info.sub_grid_size_x = info.total_grid_width % x_div);
-    } else {
-        info.sub_grid_size_x = info.total_grid_width / x_div;
-    }*/
     info.sub_grid = malloc(sizeof(complex float) * (info.sub_grid_size_x * info.sub_grid_size_y));
     
     info.energy.denominator = info.total_grid_width * info.total_grid_height;
     info.energy.numerator = info.sub_grid_size_x * info.sub_grid_size_y;
     
-    printf("Rank %d, subgrid size: (%lu, %lu), offset: (%lu, %lu), energy: %lu/%lu\n", info.rank, info.sub_grid_size_x, info.sub_grid_size_y, info.sub_grid_offset_x, info.sub_grid_offset_y, info.energy.numerator, info.energy.denominator);
+    //printf("Rank %d, subgrid size: (%lu, %lu), offset: (%lu, %lu), energy: %lu/%lu\n", info.rank, info.sub_grid_size_x, info.sub_grid_size_y, info.sub_grid_offset_x, info.sub_grid_offset_y, info.energy.numerator, info.energy.denominator);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    double start_time = MPI_Wtime();
     
     main_loop(info);
     
     MPI_File_close(&info.file);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
+    double end_time = MPI_Wtime();
+    if (info.rank == 0) {
+        printf("Time for all %d threads to finish computing fractal of size (%zu, %zu): %f seconds\n", info.num_procs, info.total_grid_width, info.total_grid_height, end_time - start_time);
+    }
     
     MPI_Finalize();
 }
@@ -158,10 +140,10 @@ enum TriState check_work_response(FractalInfo* info, int target) {
         if (buf[0] != 0) { //empty buffer signals there's no work
             unsigned long old_size_x = info->sub_grid_size_x;
             unsigned long old_size_y = info->sub_grid_size_y;
-            info->sub_grid_size_x = buf[0];
-            info->sub_grid_size_y = buf[1];
-            info->sub_grid_offset_x = buf[2];
-            info->sub_grid_offset_y = buf[3];
+            info->sub_grid_size_y = buf[0];
+            info->sub_grid_size_x = buf[1];
+            info->sub_grid_offset_y = buf[2];
+            info->sub_grid_offset_x = buf[3];
             info->energy.numerator += buf[4];
             if (old_size_x != info->sub_grid_size_x || old_size_y != info->sub_grid_size_y) {
                 info->sub_grid = realloc(info->sub_grid, sizeof(complex float) * (info->sub_grid_size_x * info->sub_grid_size_y));
@@ -179,8 +161,10 @@ void main_loop(FractalInfo info) {
     int target = -1;
     int skip_counter = 0;
     while (true) {
-        if (compute)
+        if (compute) {
+            //printf("Proc %d computing fractal with offset and dims: (%zu, %zu), (%zu, %zu)\n", info.rank, info.sub_grid_offset_x, info.sub_grid_offset_y, info.sub_grid_size_x, info.sub_grid_size_y);
             compute_fractal(&info);
+        }
         compute = false;
 
         int request;
@@ -208,9 +192,10 @@ void main_loop(FractalInfo info) {
         
         MPI_Iprobe(MPI_ANY_SOURCE, TAG_WORK_REQUEST, MPI_COMM_WORLD, &request, &status);
         if (request) {
+            int requester;
             ULONG_BUFFER buf = {0};
-            MPI_Recv(&target, 1, MPI_INT, status.MPI_SOURCE, TAG_WORK_REQUEST, MPI_COMM_WORLD, &status);
-            MPI_Send(buf, ULONG_BUFFER_COUNT, MPI_UNSIGNED_LONG, target, TAG_WORK_RESPONSE, MPI_COMM_WORLD);
+            MPI_Recv(&requester, 1, MPI_INT, status.MPI_SOURCE, TAG_WORK_REQUEST, MPI_COMM_WORLD, &status);
+            MPI_Send(buf, ULONG_BUFFER_COUNT, MPI_UNSIGNED_LONG, requester, TAG_WORK_RESPONSE, MPI_COMM_WORLD);
             //printf("Proc %d: Sent empty work response to proc %d\n", info.rank, target);
         }
         MPI_Iprobe(MPI_ANY_SOURCE, TAG_TERMINATE, MPI_COMM_WORLD, &request, &status);
@@ -266,7 +251,7 @@ void compute_fractal(FractalInfo* info) {
                 }
             }
         }
-        if (y % 4 == 0 && (info->sub_grid_size_y - y) > info->num_procs * 2) { //stop them from fighting over each other at small remaining values
+        if (y % 4 == 0 && (info->sub_grid_size_y - y) > info->num_procs * 4) { //stop them from fighting over each other at small remaining values
             int request;
             MPI_Status status;
             MPI_Iprobe(MPI_ANY_SOURCE, TAG_WORK_REQUEST, MPI_COMM_WORLD, &request, &status);
@@ -285,6 +270,7 @@ void compute_fractal(FractalInfo* info) {
                 info->sub_grid_size_y = ((info->sub_grid_size_y - y) / 2) + ((info->sub_grid_size_y - y) % 2);
                 info->energy.numerator -= buf[4];
                 MPI_Send(buf, ULONG_BUFFER_COUNT, MPI_UNSIGNED_LONG, target, TAG_WORK_RESPONSE, MPI_COMM_WORLD);
+                //printf("Proc %d rewriting fractal with offset and dims: (%zu, %zu), (%zu, %zu)\n", info->rank, info->sub_grid_offset_x, y, info->sub_grid_size_x, info->sub_grid_size_y);
                 /*if (buf[4] + info->energy.numerator != old_num) {
                     printf("Proc %d critical energy split failure!\n");
                     MPI_Abort(MPI_COMM_WORLD, 1);
@@ -315,28 +301,3 @@ void compute_fractal(FractalInfo* info) {
     }
     return;
 }
-
-/*
-Rational rational_halve(Rational in) {
-    Rational out = {in.numerator, in.denominator * 2};
-    return out;
-}
-
-Rational rational_add(Rational lhs, Rational rhs) {
-    Rational max, min;
-    if (lhs.denominator >= rhs.denominator) {
-        max = lhs;
-        min = rhs;
-    } else {
-        max = rhs;
-        min = lhs;
-    }
-    while (min.denominator != max.denominator) {
-        min.numerator *= 2;
-        min.denominator *= 2;
-    }
-    
-    max.numerator += min.numerator;
-    max.denominator += min.denominator;
-    return max;
-}*/
